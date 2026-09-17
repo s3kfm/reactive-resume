@@ -7,13 +7,17 @@ services:
     networks:
       - data_network
     environment:
-      - POSTGRES_DB=postgres
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
     volumes:
-      - postgres_data:/var/lib/postgresql
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "postgres"]
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-postgres}"
+        ]
       start_period: 10s
       interval: 30s
       timeout: 10s
@@ -25,11 +29,6 @@ services:
     command: redis-server --appendonly yes
     networks:
       - data_network
-    # Not exposed on the host by default. Redis can contain agent stream data
-    # including user chat content; keep it internal to the Docker network.
-    # Uncomment the ports block below if you need host access for tooling.
-    # ports:
-    #   - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -46,14 +45,13 @@ services:
     networks:
       - storage_network
     environment:
-      - AWS_ACCESS_KEY_ID=seaweedfs
-      - AWS_SECRET_ACCESS_KEY=seaweedfs
-    ports:
-      - "8333:8333"
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-seaweedfs}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-seaweedfs}
     volumes:
       - seaweedfs_data:/data
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8888"]
+      test:
+        ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8888"]
       start_period: 10s
       interval: 30s
       timeout: 10s
@@ -65,8 +63,8 @@ services:
     entrypoint: >
       /bin/sh -c "
         sleep 5;
-        mc alias set seaweedfs http://seaweedfs:8333 seaweedfs seaweedfs;
-        mc mb seaweedfs/reactive-resume;
+        mc alias set seaweedfs http://seaweedfs:8333 ${AWS_ACCESS_KEY_ID:-seaweedfs} ${AWS_SECRET_ACCESS_KEY:-seaweedfs};
+        mc mb --ignore-existing seaweedfs/reactive-resume;
         exit 0;
       "
     networks:
@@ -76,22 +74,29 @@ services:
         condition: service_healthy
 
   reactive_resume:
-    # image: ghcr.io/reactive-resume/reactive-resume:latest
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/reactive-resume/reactive-resume:latest
+    restart: unless-stopped
     networks:
       - data_network
       - storage_network
     ports:
       - "3000:3000"
-    env_file:
-      - path: .env.example
-        required: false
-      - path: .env
-        required: false
+    environment:
+      APP_URL: ${APP_URL}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-postgres}
+      AUTH_SECRET: ${AUTH_SECRET}
+
+      REDIS_URL: redis://redis:6379
+
+      STORAGE_ENDPOINT: http://seaweedfs:8333
+      STORAGE_REGION: us-east-1
+      STORAGE_BUCKET: reactive-resume
+      STORAGE_ACCESS_KEY: ${AWS_ACCESS_KEY_ID:-seaweedfs}
+      STORAGE_SECRET_KEY: ${AWS_SECRET_ACCESS_KEY:-seaweedfs}
+
+      LOCAL_STORAGE_PATH: /app/data
     volumes:
-      - ./data:/app/data
+      - reactive_resume_data:/app/data
     depends_on:
       postgres:
         condition: service_healthy
@@ -102,8 +107,14 @@ services:
       seaweedfs_create_bucket:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then((r) => { if (!r.ok) process.exit(1); }).catch(() => process.exit(1));"]
-      start_period: 10s
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/api/health').then((r) => { if (!r.ok) process.exit(1); }).catch(() => process.exit(1));"
+        ]
+      start_period: 20s
       interval: 30s
       timeout: 10s
       retries: 3
@@ -112,6 +123,7 @@ volumes:
   postgres_data:
   redis_data:
   seaweedfs_data:
+  reactive_resume_data:
 
 networks:
   data_network:
